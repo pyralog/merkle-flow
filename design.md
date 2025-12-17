@@ -632,15 +632,55 @@ Transport:
 - UDP-based: All messages (control, broadcast, anti-entropy) sent over WireGuard UDP tunnels
 - Handshake: 1-RTT handshake with optional pre-shared keys for additional security
 
-Why WireGuard over QUIC:
+Why WireGuard:
 
-- **Simplicity**: WireGuard has ~4,000 lines of code vs QUIC's 10,000+ lines; easier to audit and verify
-- **Performance**: ChaCha20-Poly1305 is faster than AES-GCM on systems without hardware acceleration
+- **Simplicity**: ~4,000 lines of code; easier to audit and verify
+- **Performance**: ChaCha20-Poly1305 is fast on all systems, especially those without hardware acceleration
 - **Battery efficiency**: Stateless design reduces keepalive overhead on mobile/IoT devices
 - **NAT traversal**: Built-in roaming support; connections survive IP changes seamlessly
 - **Zero-config security**: No certificate management; public keys are the identity
 - **Battle-tested**: Used in production by Cloudflare, Tailscale, and millions of VPN users
 - **Rust native**: BoringTun provides a pure-Rust implementation, avoiding C FFI and improving safety
+
+SCTP over WireGuard (Optional Enhancement):
+
+For deployments requiring advanced flow control and stream multiplexing, SCTP can be layered over WireGuard tunnels:
+
+- **Multi-streaming**: Run independent logical streams (membership, broadcast, anti-entropy, bulk sync) over a single SCTP association
+  - Eliminates head-of-line blocking: slow anti-entropy doesn't stall urgent membership updates
+  - Per-stream ordering guarantees where needed; unordered delivery for independent messages
+- **Message boundaries**: SCTP preserves datagram boundaries unlike TCP; natural fit for gossip protocol's discrete messages
+- **Multi-homing**: SCTP can leverage multiple WireGuard tunnels to the same peer (different paths/IPs) for automatic failover
+- **Partial reliability**: Use SCTP PR-SCTP extension for time-sensitive messages (e.g., drop stale pings rather than retransmit indefinitely)
+- **Built-in heartbeat**: SCTP's path validation complements SWIM probes; detect tunnel degradation faster
+- **Congestion control**: Per-stream flow control prevents bulk transfers from overwhelming control plane
+
+Architecture with SCTP:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Application Messages (framed protobufs)                │
+├─────────────────────────────────────────────────────────┤
+│ SCTP Association (multiple streams):                   │
+│  - Stream 0: Membership (SWIM Ping/Ack)               │
+│  - Stream 1: Broadcast (Plumtree eager push)          │
+│  - Stream 2: Lazy messages                            │
+│  - Stream 3: Anti-entropy control                     │
+│  - Stream 4+: Anti-entropy bulk data                  │
+├─────────────────────────────────────────────────────────┤
+│ WireGuard Tunnel (ChaCha20-Poly1305)                   │
+├─────────────────────────────────────────────────────────┤
+│ UDP (underlying transport)                             │
+└─────────────────────────────────────────────────────────┘
+```
+
+Tradeoffs:
+
+- **Pros**: Better isolation between message classes; reduced latency variance; natural backpressure per stream
+- **Cons**: Added complexity; SCTP less common than TCP/UDP (though kernel support is widespread); userspace SCTP implementations (usrsctp) add dependency
+- **Recommendation**: Start with raw UDP datagrams over WireGuard; migrate to SCTP for latency-sensitive production deployments after profiling
+
+Implementation: Use [usrsctp](https://github.com/sctplab/usrsctp) (userspace SCTP) or kernel SCTP via standard sockets; configure SCTP association with ordered delivery on streams 0-3, unordered on bulk streams.
 
 Message types (selected):
 
